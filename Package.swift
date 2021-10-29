@@ -15,14 +15,12 @@ let package =
       ),
     ],
     dependencies: [
-      .package(name: "SwiftConcurrency", url: "https://github.com/xiiagency/SwiftConcurrency", .branchItem("main")),
       .package(name: "SwiftFoundationExtensions", url: "https://github.com/xiiagency/SwiftFoundationExtensions", .branchItem("main")),
     ],
     targets: [
       .target(
         name: "SwiftSimpleCloudStore",
         dependencies: [
-          "SwiftConcurrency",
           "SwiftFoundationExtensions",
         ]
       ),

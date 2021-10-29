@@ -1,11 +1,9 @@
 import Foundation
-import SwiftConcurrency
 import SwiftFoundationExtensions
 import os
 
 /**
- A wrapper around `NSUbiquitousKeyValueStore` providing the ability to wait for the initial cloud state download
- after an app is installed and shorthand for settings/reading stored values.
+ A wrapper around `NSUbiquitousKeyValueStore` providing shorthand for settings/reading/clearing stored values.
  */
 public class SimpleCloudStore {
   /**
@@ -19,46 +17,9 @@ public class SimpleCloudStore {
   public static let DEFAULT_LOG_LEVEL: OSLogType = .info
   
   /**
-   The polling interval for initial cloud sync completion: 250ms.
-   */
-  public static let DEFAULT_INITIAL_CLOUD_SYNC_POLL_INTERVAL_SECONDS = 0.25
-  
-  /**
-   The max amount of time for the initial cloud sync, upon `syncWithCloud`: 5 seconds.
-   */
-  public static let DEFAULT_INITIAL_CLOUD_SYNC_TIMEOUT_SECONDS = 5.0
-  
-  /**
-   Key for recording whether the initial cloud sync of the data was done.
-   */
-  private static let KEY_INITIAL_CLOUD_SYNC_COMPLETED = "isInitialCloudSyncCompleted"
-  
-  /**
    The log level used for informational messages from the store.
    */
   private let logLevel: OSLogType
-  
-  /**
-   The polling interval if a call to `syncWithCloud` is called the first time after installation and we are waiting for the initial
-   cloud sync to complete.
-   */
-  private let initialCloudSyncPollIntervalSeconds: Double
-  
-  /**
-   The maximum amount of time to wait if a call to `syncWithCloud` is called the first time after installation and we are waiting
-   for the initial cloud sync to complete
-   */
-  private let initialCloudSyncTimeoutSeconds: Double
-  
-  /**
-   True if this class is registered to external store change notifications, false otherwise.
-   */
-  private var notificationRegistered: Bool = false
-  
-  /**
-   When true, the initial sync has bee completed, either in a prior sync operation or during initialization.
-   */
-  private var initialCloudSyncCompleted: Bool = false
   
   /**
    The underlying value store.
@@ -68,105 +29,17 @@ public class SimpleCloudStore {
   /**
    Initializes a new `SimpleCloudStore`.
    
-   `syncWithCloud` can be called once in the app's lifecycle after initialization to ensure that the local
-   values reflect those in the cloud.
-   
    - Parameter logLevel: the log level used for informational messages from the store.
-   - Parameter initialCloudSyncPollIntervalSeconds: polling interval for the initial cloud state sync.
-   - Parameter initialCloudSyncTimeoutSeconds: the timeout for the initial cloud state sync.
    */
-  public init(
-    logLevel: OSLogType = DEFAULT_LOG_LEVEL,
-    initialCloudSyncPollIntervalSeconds: Double = DEFAULT_INITIAL_CLOUD_SYNC_POLL_INTERVAL_SECONDS,
-    initialCloudSyncTimeoutSeconds: Double = DEFAULT_INITIAL_CLOUD_SYNC_TIMEOUT_SECONDS
-  ) {
+  public init(logLevel: OSLogType = DEFAULT_LOG_LEVEL) {
     self.logLevel = logLevel
-    self.initialCloudSyncPollIntervalSeconds = initialCloudSyncPollIntervalSeconds
-    self.initialCloudSyncTimeoutSeconds = initialCloudSyncTimeoutSeconds
-    
-    // Subscribe to external change notifications so that we know when synchronization has finished.
-    subscribeToExternalChangeNotifications()
-  }
-  
-  deinit {
-    // Ensure we unsubscribe from key/value store modification notifications when shutting down.
-    unsubscribeFromExternalChangeNotifications()
   }
   
   /**
-   Subscribes to the underlying store's `NSUbiquitousKeyValueStore.didChangeExternallyNotification` notification,
-   allowing this store to know when the initial synchronization has completed. See `syncWithCloud` for details.
-   */
-  private func subscribeToExternalChangeNotifications() {
-    // If already registered, nothing to do.
-    guard !notificationRegistered else {
-      return
-    }
-    
-    Self.logger.log(
-      level: logLevel,
-      "Registering to external store change notifications."
-    )
-    
-    NotificationCenter.default
-      .addObserver(
-        self,
-        selector: #selector(onStoreExternallyChanged(_:)),
-        name: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-        object: store
-      )
-    
-    notificationRegistered = true
-  }
-  
-  /**
-   Unsubscribes from the underlying store's `NSUbiquitousKeyValueStore.didChangeExternallyNotification`
-   notification. See `syncWithCloud` for details.
-   */
-  private func unsubscribeFromExternalChangeNotifications() {
-    Self.logger.log(
-      level: logLevel,
-      "Shutting down, unregistering from external store change notifications."
-    )
-    
-    NotificationCenter.default
-      .removeObserver(
-        self,
-        name: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-        object: store
-      )
-    
-    notificationRegistered = false
-  }
-  
-  /**
-   Called when external change notifications are received for the underlying store.
-   */
-  @objc
-  private func onStoreExternallyChanged(_ notification: Notification) {
-    // Extract notification change reason.
-    let rawChangeReason = notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey]
-    guard let reason = rawChangeReason as? Int else {
-      return
-    }
-    
-    // If we received a notification that the initial sync is done, mark it as done.
-    if reason == NSUbiquitousKeyValueStoreInitialSyncChange {
-      initialCloudSyncCompleted = true
-    }
-  }
-  
-  /**
-   Synchronizes the in-memory storage with their stored and cloud state.
+   Synchronizes the in-memory storage with their stored state (and possibly the cloud state).
    This function should be called once during app start up and when the app comes back into foreground.
-   The first time this function is called after app installation, it will wait for the cloud state to be downloaded.
-   
-   NOTE: Cloud synchronization is not guaranteed to happen right away.
-   
-   NOTE: The operation is restricted to `@MainActor` for simplicity, but will not block the main thread.
    */
-  @MainActor
-  public func syncWithCloud() async throws {
+  public func synchronize() {
     // Trigger the underlying store's in-memory -> disk synchronization, which will in turn schedule
     // the cloud sync if needed.
     if !store.synchronize() {
@@ -176,41 +49,7 @@ public class SimpleCloudStore {
     }
     
     // Notify the log that the main sync succeeded.
-    Self.logger.log(level: logLevel, "Synchronizing simple cloud store.")
-    
-    // If there was a previous initial cloud sync, nothing left to do.
-    initialCloudSyncCompleted = initialCloudSyncCompleted ||
-      getBool(forKey: Self.KEY_INITIAL_CLOUD_SYNC_COMPLETED)
-    
-    if initialCloudSyncCompleted {
-      Self.logger.log(
-        level: logLevel,
-        "Simple cloud store initial cloud sync already done, skipping wait."
-      )
-      return
-    }
-    
-    // Poll for completion via notification callback.
-    let syncCompleted = try await Task.poll(
-      intervalSeconds: initialCloudSyncPollIntervalSeconds,
-      timeoutSeconds: initialCloudSyncTimeoutSeconds
-    ) { @MainActor [self] in
-      // See if the sync completed via onStoreExternallyChanged callback.
-      if initialCloudSyncCompleted {
-        // Mark it as done in the store itself, so that we don't do it again.
-        set(forKey: Self.KEY_INITIAL_CLOUD_SYNC_COMPLETED, value: true)
-        
-        // Let the caller know the whole process is done.
-        Self.logger.log(level: logLevel, "Initial simple cloud store sync done.")
-      }
-      
-      return initialCloudSyncCompleted
-    }
-    
-    // If the sync didn't finish and we're not cancelled, it was a timeout.
-    if !Task.isCancelled && !syncCompleted {
-      Self.logger.log(level: logLevel, "Initial simple cloud store sync timed out.")
-    }
+    Self.logger.log(level: logLevel, "Synchronized simple cloud store.")
   }
   
   /**
