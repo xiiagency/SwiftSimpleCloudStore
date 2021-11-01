@@ -42,7 +42,7 @@ public struct StaticSimpleCloudStoreProvider : SimpleCloudStoreProvider {
  */
 private struct SimpleCloudStoreProviderKey : EnvironmentKey {
   /**
-   Uses an instance of `UnknownSimpleCloudStoreProvider` as the default value.
+   Uses an instance of `UnavailableSimpleCloudStoreProvider` as the default value.
    */
   static let defaultValue: SimpleCloudStoreProvider = UnavailableSimpleCloudStoreProvider()
 }
